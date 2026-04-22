@@ -1,5 +1,5 @@
-from transformers import AutoFeatureExtractor
+from transformers import AutoModel
 
-processor = AutoFeatureExtractor.from_pretrained("facebook/wav2vec2-xls-r-1b")
+processor = AutoModel.from_pretrained("facebook/wav2vec2-xls-r-1b")
 
-print(dir(model))
+print(dir(processor))
