@@ -1,0 +1,5 @@
+experiment,train_language,test_language,n_train,n_test,accuracy,f1_weighted
+mandarin_to_mandarin,mandarin,mandarin,14000,3500,0.468,0.46057763519272865
+english_to_english,english,english,14000,3500,0.3494285714285714,0.336404489268151
+mandarin_to_english,mandarin,english,17500,17500,0.2952571428571429,0.2756879444057518
+english_to_mandarin,english,mandarin,17500,17500,0.3989142857142857,0.37651613871432854
