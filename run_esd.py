@@ -7,14 +7,17 @@ import pandas as pd
 import torch
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.svm import LinearSVC
 from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2Model
 
 
 MODEL_NAME = "facebook/wav2vec2-large-xlsr-53"
 SAMPLE_RATE = 16000
 RANDOM_STATE = 42
-MAX_ITER = 2000
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR
@@ -22,7 +25,7 @@ OUTPUTS_DIR = BASE_DIR / "outputs"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 COMBINED_EMBEDDINGS_PATH = OUTPUTS_DIR / "esd_embeddings_all.pkl"
-RESULTS_PATH = OUTPUTS_DIR / "experiment_results.csv"
+RESULTS_PATH = OUTPUTS_DIR / "experiment_results_tuned.csv"
 
 DEVICE = torch.device("cpu")
 
@@ -37,10 +40,13 @@ def load_wav2vec_model(model_name: str = MODEL_NAME):
 
 def get_language_from_speaker(speaker_id: str) -> str:
     speaker_num = int(speaker_id)
+
     if 1 <= speaker_num <= 10:
         return "mandarin"
+
     if 11 <= speaker_num <= 20:
         return "english"
+
     raise ValueError(f"Unknown speaker id: {speaker_id}")
 
 
@@ -117,6 +123,7 @@ def process_and_save_per_speaker(
             continue
 
         speaker_id = speaker_dir.name
+
         if not speaker_id.isdigit():
             continue
 
@@ -127,6 +134,7 @@ def process_and_save_per_speaker(
             continue
 
         print(f"Processing speaker {speaker_id}...")
+
         speaker_df = process_single_speaker(
             speaker_dir=speaker_dir,
             feature_extractor=feature_extractor,
@@ -159,17 +167,91 @@ def load_embeddings(input_path: Path):
 def prepare_features_and_labels(df: pd.DataFrame):
     X = np.stack(df["embedding"].values)
     y = df["emotion"].values
+
+    label_encoder = LabelEncoder()
+    y = label_encoder.fit_transform(y)
+
     return X, y
 
 
-def train_logistic_regression(X_train, y_train, max_iter: int = MAX_ITER):
-    clf = LogisticRegression(max_iter=max_iter, random_state=RANDOM_STATE)
-    clf.fit(X_train, y_train)
-    return clf
+def get_classifiers():
+    logistic_regression = GridSearchCV(
+        Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                (
+                    "clf",
+                    LogisticRegression(
+                        max_iter=5000,
+                        random_state=RANDOM_STATE,
+                    ),
+                ),
+            ]
+        ),
+        param_grid={
+            "clf__C": [0.01, 0.1, 1, 10, 100],
+            "clf__class_weight": [None, "balanced"],
+        },
+        cv=5,
+        scoring="f1_weighted",
+        n_jobs=-1,
+    )
+
+    linear_svm = GridSearchCV(
+        Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                (
+                    "clf",
+                    LinearSVC(
+                        max_iter=10000,
+                        random_state=RANDOM_STATE,
+                    ),
+                ),
+            ]
+        ),
+        param_grid={
+            "clf__C": [0.01, 0.1, 1, 10],
+            "clf__class_weight": [None, "balanced"],
+        },
+        cv=5,
+        scoring="f1_weighted",
+        n_jobs=-1,
+    )
+
+    mlp = GridSearchCV(
+        Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                (
+                    "clf",
+                    MLPClassifier(
+                        max_iter=500,
+                        random_state=RANDOM_STATE,
+                        early_stopping=False,
+                    ),
+                ),
+            ]
+        ),
+        param_grid={
+            "clf__hidden_layer_sizes": [(128,), (256,), (256, 128)],
+            "clf__alpha": [0.0001, 0.001, 0.01],
+        },
+        cv=3,
+        scoring="f1_weighted",
+        n_jobs=-1,
+    )
+
+    return {
+        "logistic_regression": logistic_regression,
+        "linear_svm": linear_svm,
+        "mlp": mlp,
+    }
 
 
-def evaluate_model(clf, X_test, y_test):
+def evaluate_classifier(clf, X_test, y_test):
     y_pred = clf.predict(X_test)
+
     return {
         "accuracy": accuracy_score(y_test, y_pred),
         "f1_weighted": f1_score(y_test, y_pred, average="weighted"),
@@ -189,48 +271,74 @@ def run_within_language_experiment(df: pd.DataFrame, language: str):
         stratify=y,
     )
 
-    clf = train_logistic_regression(X_train, y_train)
-    results = evaluate_model(clf, X_test, y_test)
+    results = []
 
-    return {
-        "experiment": f"{language}_to_{language}",
-        "train_language": language,
-        "test_language": language,
-        "n_train": len(X_train),
-        "n_test": len(X_test),
-        "accuracy": results["accuracy"],
-        "f1_weighted": results["f1_weighted"],
-    }
+    for classifier_name, clf in get_classifiers().items():
+        print(f"Training {classifier_name}: {language} -> {language}")
+
+        clf.fit(X_train, y_train)
+        scores = evaluate_classifier(clf, X_test, y_test)
+
+        results.append(
+            {
+                "experiment": f"{language}_to_{language}",
+                "classifier": classifier_name,
+                "train_language": language,
+                "test_language": language,
+                "n_train": len(X_train),
+                "n_test": len(X_test),
+                "accuracy": scores["accuracy"],
+                "f1_weighted": scores["f1_weighted"],
+                "best_params": clf.best_params_,
+            }
+        )
+
+    return results
 
 
-def run_cross_language_experiment(df: pd.DataFrame, train_language: str, test_language: str):
+def run_cross_language_experiment(
+    df: pd.DataFrame,
+    train_language: str,
+    test_language: str,
+):
     train_df = df[df["language"] == train_language].copy()
     test_df = df[df["language"] == test_language].copy()
 
     X_train, y_train = prepare_features_and_labels(train_df)
     X_test, y_test = prepare_features_and_labels(test_df)
 
-    clf = train_logistic_regression(X_train, y_train)
-    results = evaluate_model(clf, X_test, y_test)
+    results = []
 
-    return {
-        "experiment": f"{train_language}_to_{test_language}",
-        "train_language": train_language,
-        "test_language": test_language,
-        "n_train": len(X_train),
-        "n_test": len(X_test),
-        "accuracy": results["accuracy"],
-        "f1_weighted": results["f1_weighted"],
-    }
+    for classifier_name, clf in get_classifiers().items():
+        print(f"Training {classifier_name}: {train_language} -> {test_language}")
+
+        clf.fit(X_train, y_train)
+        scores = evaluate_classifier(clf, X_test, y_test)
+
+        results.append(
+            {
+                "experiment": f"{train_language}_to_{test_language}",
+                "classifier": classifier_name,
+                "train_language": train_language,
+                "test_language": test_language,
+                "n_train": len(X_train),
+                "n_test": len(X_test),
+                "accuracy": scores["accuracy"],
+                "f1_weighted": scores["f1_weighted"],
+                "best_params": clf.best_params_,
+            }
+        )
+
+    return results
 
 
 def run_all_experiments(df: pd.DataFrame):
     results = []
 
-    results.append(run_within_language_experiment(df, "mandarin"))
-    results.append(run_within_language_experiment(df, "english"))
-    results.append(run_cross_language_experiment(df, "mandarin", "english"))
-    results.append(run_cross_language_experiment(df, "english", "mandarin"))
+    results.extend(run_within_language_experiment(df, "mandarin"))
+    results.extend(run_within_language_experiment(df, "english"))
+    results.extend(run_cross_language_experiment(df, "mandarin", "english"))
+    results.extend(run_cross_language_experiment(df, "english", "mandarin"))
 
     return pd.DataFrame(results)
 
@@ -267,20 +375,34 @@ def main():
     print("\nDataset summary:")
     print(f"Number of files: {len(df)}")
     print(f"Embedding shape: {df.iloc[0]['embedding'].shape}")
+
     print("\nFiles per language:")
     print(df["language"].value_counts())
+
     print("\nFiles per emotion:")
     print(df["emotion"].value_counts())
 
-    print("\nRunning experiments...")
+    print("\nRunning tuned experiments...")
     results_df = run_all_experiments(df)
 
     print("\nResults:")
-    print(results_df[["experiment", "n_train", "n_test", "accuracy", "f1_weighted"]])
+    print(
+        results_df[
+            [
+                "experiment",
+                "classifier",
+                "n_train",
+                "n_test",
+                "accuracy",
+                "f1_weighted",
+                "best_params",
+            ]
+        ]
+    )
 
     results_df.to_csv(RESULTS_PATH, index=False)
 
-    print(f"\nSaved results to: {RESULTS_PATH}")
+    print(f"\nSaved tuned results to: {RESULTS_PATH}")
     print(f"Results file exists: {RESULTS_PATH.exists()}")
     print(f"Combined embeddings file exists: {COMBINED_EMBEDDINGS_PATH.exists()}")
 
