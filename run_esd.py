@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
-from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.model_selection import GridSearchCV, train_test_split, GroupShuffleSplit
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -263,13 +263,13 @@ def run_within_language_experiment(df: pd.DataFrame, language: str):
 
     X, y = prepare_features_and_labels(subset)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=0.2,
-        random_state=RANDOM_STATE,
-        stratify=y,
-    )
+    # Speaker-independent split: ensure train/test speakers are disjoint.
+    groups = subset["speaker"].values
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=RANDOM_STATE)
+    train_idx, test_idx = next(gss.split(X, y, groups))
+
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
 
     results = []
 
